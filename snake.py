@@ -291,22 +291,91 @@ def count_free_neighbors(pos, snake_body):
             free += 1
     return free
 
-def simplex(coefs):
-    """
-    Colocar 1 na posição do maior coeficiente.
-    Retorna vetor w.
-    """
-    
-    max_value = coefs[0]
-    index = 0
-    for i in range(1, len(coefs)):
-        if coefs[i] > max_value:
-            max_value = coefs[i]
-            index = i
+def simplex_tableau(c, A, b, eps=1e-9, max_iter=1000):
+    m = len(A)
+    n = len(c)
+    tableau = [[0.0]*(n+m+1) for _ in range(m+1)]
 
-    w = [0.0] * len(coefs)
-    w[index] = 1.0
-    return w
+    # Montagem das restrições
+    for i in range(m):
+        for j in range(n):
+            tableau[i][j] = float(A[i][j])
+        tableau[i][n+i] = 1.0
+        tableau[i][-1] = float(b[i])
+
+    # Linha da função objetivo
+    for j in range(n):
+        tableau[m][j] = -float(c[j])
+
+    basis = [n+i for i in range(m)]
+
+    def pivot(r, c):
+        p = tableau[r][c]
+        tableau[r] = [v/p for v in tableau[r]]
+        for i in range(m+1):
+            if i != r:
+                f = tableau[i][c]
+                tableau[i] = [tableau[i][j] - f*tableau[r][j] for j in range(n+m+1)]
+
+    it = 0
+    while it < max_iter:
+        it += 1
+        entering = None
+        mv = -eps
+        for j in range(n+m):
+            if tableau[m][j] < mv:
+                mv = tableau[m][j]
+                entering = j
+
+        if entering is None:
+            x = [0.0]*n
+            for i in range(m):
+                if basis[i] < n:
+                    x[basis[i]] = tableau[i][-1]
+            return x, tableau[m][-1]
+
+        leaving = None
+        mr = float('inf')
+        for i in range(m):
+            a = tableau[i][entering]
+            if a > eps:
+                r = tableau[i][-1] / a
+                if r < mr:
+                    mr = r
+                    leaving = i
+
+        if leaving is None:
+            return None, None
+
+        basis[leaving] = entering
+        pivot(leaving, entering)
+
+    return None, None
+
+def simplex(coefs):
+    n = len(coefs)
+    A = []
+    b = []
+
+    # Σ pesos = 1
+    A.append([1.0]*n); b.append(1.0)
+    # Σ pesos >= 1 (invertido para Simplex)
+    A.append([-1.0]*n); b.append(-1.0)
+
+    c = [float(x) for x in coefs]
+
+    x, val = simplex_tableau(c, A, b)
+
+    if x is None:
+        return [1.0/n]*n
+
+    w = [max(0.0, xi) for xi in x]
+    s = sum(w)
+
+    if s == 0:
+        return [1.0/n]*n
+
+    return [wi/s for wi in w]
 
 def simplex_move(head, move_x, move_y, snake_body, apple):
     """
@@ -321,32 +390,49 @@ def simplex_move(head, move_x, move_y, snake_body, apple):
         if dx == -move_x and dy == -move_y:
             continue
 
-        move_x = head[0] + dx * GRID_SIZE
-        move_y = head[1] + dy * GRID_SIZE
+        nx = head[0] + dx * GRID_SIZE
+        ny = head[1] + dy * GRID_SIZE
 
-        if is_safe(move_x, move_y, snake_body):
-            valid_moves.append((move_x, move_y))
+        if is_safe(nx, ny, snake_body):
+            valid_moves.append((nx, ny))
 
     if not valid_moves:
         return 0, 0
 
-    # calcular coeficientes de ganho como média das heurísticas nos candidatos
-    dist_scores = 0.0
-    safety_scores = 0.0
+    scores = []
     for move in valid_moves:
         distance = abs(move[0] - apple[0]) + abs(move[1] - apple[1])
-        dist_scores += 1 - (distance / (SCREEN_WIDTH + SCREEN_HEIGHT))
-        safety_scores += count_free_neighbors(move, snake_body) / 4.0
+        safety_scores = count_free_neighbors(move, snake_body) / 4.0
 
-    n = len(valid_moves)
-    coefs = [dist_scores / n, safety_scores / n]
-    weights = simplex(coefs)
+        if distance != 0:
+            dist_scores = 1 / distance ** 0.5
+        else:
+            dist_scores = 1
+
+        
+
+        coefs = [dist_scores, safety_scores]
+        weights = simplex(coefs)
+
+        # if apple is in any corner, the distance get priority
+        # to avoid loops due security        
+        if apple[0] in (GRID_SIZE, SCREEN_WIDTH) and apple[1] in (SCORE_HEIGHT, SCREEN_HEIGHT - GRID_SIZE):
+            weights[0] = max(weights[0], 0.8)
+            weights[1] = 1 - weights[0]
+
+
+
+        if weights[0] < 0.6:
+            weights[0] = 0.6
+            weights[1] = 0.4
+        
+        score = evaluate_move(move, apple, snake_body, weights)
+        scores.append((move, score))
 
     # avaliar candidatos e escolher o melhor
     best = None
     best_score = -1
-    for move in valid_moves:
-        score = evaluate_move(move, apple, snake_body, weights)
+    for move, score in scores:
         if score > best_score:
             best_score = score
             best = (move[0] - head[0], move[1] - head[1])
@@ -359,7 +445,12 @@ def evaluate_move(move, apple, snake_body, weights):
     
     distance = abs(move[0] - apple[0]) + abs(move[1] - apple[1])
    
-    h_dist = 1 - (distance / max_dist)
+    if distance != 0:
+        h_dist = 1 / distance ** 0.5
+    else:
+        h_dist = 1
+
+    #h_dist = 1 - (distance / max_dist)
     h_seg = count_free_neighbors(move, snake_body) / 4.0
     
     return weights[0] * h_dist + weights[1] * h_seg
